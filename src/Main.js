@@ -8,7 +8,7 @@
  *   uninstall()   Removes all triggers and run state (the sheet and labels are left alone).
  *
  * A run is a small state machine saved in Script Properties so it can span many
- * 6-minute executions: learn -> sweep -> trash (live only) -> folders -> finish.
+ * 6-minute executions: learn -> sweep -> unsubscribe -> trash (live only) -> folders -> finish.
  */
 
 function setup() {
@@ -82,6 +82,7 @@ function startRun_() {
       cursor: 0,
       errors: 0,
       counts: { checked: 0, deleted: 0, trashed: 0, review: 0, kept: 0, skipped: 0, sorted: 0 },
+      unsub: {},
       sortedBy: {},
       newFolders: [],
       notes: notes,
@@ -137,6 +138,7 @@ function runSegment_() {
 const PHASES = {
   learn: phaseLearn_,
   sweep: phaseSweep_,
+  unsubscribe: phaseUnsubscribe_,
   trash: phaseTrash_,
   folders: phaseFolders_,
   finish: phaseFinish_,
@@ -159,7 +161,7 @@ function phaseLearn_(state) {
 /** Step 2: classify every inbox thread, log to the sheet, and file into folders. */
 function phaseSweep_(state, deadline) {
   const ctx = buildSweepContext_(state);
-  const out = { REVIEW: [], TRIAL: [], DELETED: [] };
+  const out = { REVIEW: [], TRIAL: [], DELETED: [], UNSUB: [] };
   const senders = loadSenders_();
   const flush = () => {
     Object.keys(out).forEach(key => { appendRows_(key, out[key]); out[key] = []; });
@@ -169,7 +171,7 @@ function phaseSweep_(state, deadline) {
     while (Date.now() < deadline) {
       const pass = CONFIG.PASSES[state.pass];
       if (!pass) {
-        state.phase = state.mode === 'LIVE' ? 'trash' : 'folders';
+        state.phase = state.mode === 'LIVE' ? 'unsubscribe' : 'folders';
         state.cursor = 0;
         return;
       }
@@ -207,7 +209,24 @@ function buildSweepContext_(state) {
     trialLogged: new Set(readColumn_('TRIAL', 'Thread ID')),
     pendingDeletes: new Set(readTable_('DELETED')
       .filter(r => r['Run ID'] === state.runId).map(r => String(r['Thread ID']))),
+    unsubSenders: unsubSendersToSkip_(state),
   };
+}
+
+/**
+ * Senders that need no unsubscribe row this run: already unsubscribed successfully, already
+ * queued this run, or (in a trial) already listed by an earlier trial.
+ */
+function unsubSendersToSkip_(state) {
+  const skip = new Set();
+  readTable_('UNSUB').forEach(r => {
+    const email = String(r['Sender Email'] || '').toLowerCase();
+    const trialRow = /^Would|\(trial\)$/.test(String(r.Status));
+    if (r.Status === 'Succeeded' || r['Run ID'] === state.runId || (state.mode !== 'LIVE' && trialRow)) {
+      skip.add(email);
+    }
+  });
+  return skip;
 }
 
 function processThread_(id, pass, state, ctx, out, senders) {
@@ -229,6 +248,10 @@ function processThread_(id, pass, state, ctx, out, senders) {
   }
   if (v.action === ACTION.DELETE) {
     state.counts.deleted++;
+    if (v.unsubscribe && !ctx.unsubSenders.has(t.fromEmail)) {
+      out.UNSUB.push(unsubRow_(t, state));
+      ctx.unsubSenders.add(t.fromEmail);
+    }
     if (live && !ctx.pendingDeletes.has(t.id)) {
       out.DELETED.push([sender_(t), subject_(t), new Date(t.date), v.reason, threadLink_(t.id), 'Pending',
         t.fromEmail, t.id, state.runId]);
@@ -260,7 +283,65 @@ function processThread_(id, pass, state, ctx, out, senders) {
   }
 }
 
-/** Step 3 (live only): move everything queued in the Deletion Log to Gmail's Trash. */
+/** One Unsubscribe Log row. Trials record the plan only; live runs queue it as Pending. */
+function unsubRow_(t, state) {
+  const plan = planUnsubscribe(t.listUnsubscribe, t.listUnsubscribePost);
+  const live = state.mode === 'LIVE';
+  let status;
+  let details;
+  if (!plan) {
+    status = live ? 'No unsubscribe option found' : 'No unsubscribe option found (trial)';
+    details = 'The email has no List-Unsubscribe header; it is deleted without unsubscribing';
+  } else {
+    status = live ? 'Pending' : 'Would attempt (trial)';
+    details = live ? '' : 'Trial run: nothing was clicked or sent';
+  }
+  bumpUnsub_(state, status);
+  return [sender_(t), subject_(t), new Date(t.date), plan ? plan.method : '', plan ? plan.target : '', status,
+    details, t.fromEmail, t.id, state.runId, new Date()];
+}
+
+function bumpUnsub_(state, status) {
+  if (status === 'Pending') return;
+  const key = status.replace(/ \(trial\)$/, '');
+  state.unsub[key] = (state.unsub[key] || 0) + 1;
+}
+
+/** Step 3 (live only): unsubscribe from never-opened newsletters before they are deleted. */
+function phaseUnsubscribe_(state, deadline) {
+  const sh = tab_('UNSUB');
+  const cols = COLUMNS.UNSUB;
+  const last = sh.getLastRow();
+  if (last < 2) {
+    state.phase = 'trash';
+    return;
+  }
+  const values = sh.getRange(2, 1, last - 1, cols.length).getValues();
+  const col = name => cols.indexOf(name);
+  const start = state.cursor || 0;
+  const updates = [];
+  let i = start;
+  for (; i < values.length && Date.now() < deadline; i++) {
+    const row = values[i];
+    let status = row[col('Status')];
+    let details = row[col('Details')];
+    if (row[col('Run ID')] === state.runId && status === 'Pending') {
+      const result = attemptUnsubscribe_(row[col('Method')], String(row[col('Unsubscribe Target')]));
+      status = result.status;
+      details = result.details;
+      bumpUnsub_(state, status);
+    }
+    updates.push([status, details]);
+  }
+  if (updates.length) sh.getRange(2 + start, col('Status') + 1, updates.length, 2).setValues(updates.map(r => r.map(safeCell_)));
+  state.cursor = i;
+  if (i >= values.length) {
+    state.phase = 'trash';
+    state.cursor = 0;
+  }
+}
+
+/** Step 4 (live only): move everything queued in the Deletion Log to Gmail's Trash. */
 function phaseTrash_(state, deadline) {
   const sh = tab_('DELETED');
   const cols = COLUMNS.DELETED;
@@ -298,9 +379,10 @@ function phaseTrash_(state, deadline) {
   }
 }
 
-/** Step 4: create up to two new folders for senders that keep showing up unsorted. */
+/** Step 5: create up to two new folders for senders that keep showing up unsorted. */
 function phaseFolders_(state, deadline) {
   const live = state.mode === 'LIVE';
+  if (state.filing && !continueFiling_(state, deadline)) return;
   const agent = loadAgentLabels_();
   const weekAgo = Date.now() - 7 * 24 * 60 * 60 * 1000;
   const createdThisWeek = Object.keys(agent).filter(id => agent[id].sender && agent[id].createdAt > weekAgo).length;
@@ -330,22 +412,32 @@ function phaseFolders_(state, deadline) {
       slots--;
       continue;
     }
-    const labelId = ensureFolderLabel_(name, email);
-    let filed = 0;
-    for (let i = 0; i < unsorted.length && Date.now() < deadline; i++) {
-      labelThread_(unsorted[i], labelId);
-      filed++;
-    }
-    appendRows_('FOLDERS', [[new Date(), name, 'Recurring sender: ' + why, filed]]);
+    state.filing = { name: name, labelId: ensureFolderLabel_(name, email), ids: unsorted, next: 0, why: why };
     state.newFolders.push(name);
-    state.counts.sorted += filed;
-    state.sortedBy[name] = (state.sortedBy[name] || 0) + filed;
     slots--;
+    if (!continueFiling_(state, deadline)) return;
   }
   if (Date.now() < deadline) state.phase = 'finish';
 }
 
-/** Step 5: record the run in the Run Log tab. */
+/**
+ * Files a new folder's emails, resuming across segments if time runs out.
+ * @return {boolean} true once all of them are filed and the folder is logged
+ */
+function continueFiling_(state, deadline) {
+  const f = state.filing;
+  for (; f.next < f.ids.length; f.next++) {
+    if (Date.now() >= deadline) return false;
+    labelThread_(f.ids[f.next], f.labelId);
+    state.counts.sorted++;
+    state.sortedBy[f.name] = (state.sortedBy[f.name] || 0) + 1;
+  }
+  appendRows_('FOLDERS', [[new Date(), f.name, 'Recurring sender: ' + f.why, f.ids.length]]);
+  delete state.filing;
+  return true;
+}
+
+/** Step 6: record the run in the Run Log tab. */
 function phaseFinish_(state) {
   const live = state.mode === 'LIVE';
   const sorted = Object.keys(state.sortedBy).map(k => k + ': ' + state.sortedBy[k]).join(', ') || 'none';
@@ -362,6 +454,7 @@ function phaseFinish_(state) {
     live ? sorted : 'would sort: ' + sorted,
     state.newFolders.join(', ') || 'none',
     notes.join('\n'),
+    Object.keys(state.unsub).map(k => k + ': ' + state.unsub[k]).join(', ') || 'none',
   ]]);
   writeSettingStatus_(SETTING.MODE, live ? 'Live' : 'Trial');
   writeSettingStatus_(SETTING.LAST_RUN, new Date());

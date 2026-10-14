@@ -86,7 +86,8 @@ function makeWorld(threads) {
   const props = {};
   const triggers = [];
   const labels = [{ id: 'INBOX', name: 'INBOX' }];
-  const state = { ss: null, trashed: [], labelled: [], now: Date.parse('2026-10-18T07:00:00Z') };
+  const state = { ss: null, trashed: [], labelled: [], fetched: [], sent: [], events: [], uuids: 0,
+    now: Date.parse('2026-10-18T07:00:00Z') };
   const byId = id => threads.find(t => t.id === id);
   const inInbox = t => !state.trashed.includes(t.id);
 
@@ -110,7 +111,14 @@ function makeWorld(threads) {
           t.messages.forEach(m => { m.labelIds = Array.from(new Set([...(m.labelIds || []), ...body.addLabelIds])); });
           state.labelled.push([id, body.addLabelIds[0]]);
         },
-        trash(_, id) { state.trashed.push(id); },
+        trash(_, id) { state.trashed.push(id); state.events.push('trash:' + id); },
+      },
+      Messages: {
+        send(body) {
+          const raw = Buffer.from(body.raw, 'base64url').toString('utf8');
+          state.sent.push(raw);
+          state.events.push('send:' + raw.match(/^To: (.*)$/m)[1]);
+        },
       },
       Labels: {
         list() { return { labels: labels.slice() }; },
@@ -144,7 +152,18 @@ function makeWorld(threads) {
     CacheService: { getScriptCache: () => ({ get: () => null, put() {} }) },
     LockService: { getScriptLock: () => ({ tryLock: () => true, releaseLock() {} }) },
     Session: { getEffectiveUser: () => ({ getEmail: () => 'me@gmail.com' }) },
-    Utilities: { getUuid: () => '1234abcd-0000' },
+    Utilities: {
+      getUuid: () => (++state.uuids).toString(16).padStart(8, '0') + '-0000',
+      Charset: { UTF_8: 'UTF-8' },
+      base64EncodeWebSafe: s => Buffer.from(s, 'utf8').toString('base64url'),
+    },
+    UrlFetchApp: {
+      fetch(url, opts) {
+        state.fetched.push([opts.method, url, opts.payload || '']);
+        state.events.push('fetch:' + url);
+        return { getResponseCode: () => (/fail/.test(url) ? 500 : 200) };
+      },
+    },
     ScriptApp: {
       WeekDay: { SUNDAY: 'SUNDAY' },
       getProjectTriggers: () => triggers.slice(),

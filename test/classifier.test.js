@@ -6,8 +6,11 @@ const vm = require('node:vm');
 
 // Load the Apps Script file the way Apps Script does: as a plain global script.
 const source = fs.readFileSync(path.join(__dirname, '..', 'src', 'Classifier.js'), 'utf8');
-const { classifyThread, normalizeThread, folderNameFor, ACTION } = vm.runInNewContext(
-  source + '\n;({ classifyThread, normalizeThread, folderNameFor, ACTION })');
+const { classifyThread, normalizeThread, folderNameFor, planUnsubscribe, parseMailto, ACTION } = vm.runInNewContext(
+  source + '\n;({ classifyThread, normalizeThread, folderNameFor, planUnsubscribe, parseMailto, ACTION })');
+
+// Objects from the vm context have a different Object prototype; compare them as plain data.
+const plain = o => JSON.parse(JSON.stringify(o));
 
 /** Builds a Gmail API thread resource (format=metadata). */
 function raw({ id = 't1', from = 'Someone <someone@example.com>', subject = '', snippet = '', labels = ['INBOX'],
@@ -205,4 +208,33 @@ test('folder names are plain language', () => {
   assert.equal(folderNameFor('', 'news@mail.patagonia.com'), 'Patagonia');
   assert.equal(folderNameFor('"Team Strava"', 'no-reply@strava.com'), 'Strava');
   assert.equal(folderNameFor('noreply', 'alerts@bbc.co.uk'), 'Bbc');
+});
+
+test('never-opened newsletters are marked for unsubscribing; other deletions are not', () => {
+  const news = classify(raw({ from: 'Weekly <hello@weekly.com>', subject: 'Issue 1',
+    labels: ['INBOX', 'UNREAD', 'CATEGORY_UPDATES'], headers: BULK }));
+  assert.equal(news.unsubscribe, true);
+  const promo = classify(raw({ from: 'Old Navy <deals@email.oldnavy.com>', subject: '50% off, shop now',
+    labels: ['INBOX', 'CATEGORY_PROMOTIONS'], headers: BULK }));
+  assert.equal(promo.action, ACTION.DELETE);
+  assert.ok(!promo.unsubscribe);
+});
+
+test('planUnsubscribe prefers one-click, then email, then a plain link', () => {
+  const both = '<mailto:u@list.com?subject=stop>, <https://list.com/u?x=1>';
+  assert.deepEqual(plain(planUnsubscribe(both, 'List-Unsubscribe=One-Click')),
+    { method: 'One-click link', target: 'https://list.com/u?x=1' });
+  assert.deepEqual(plain(planUnsubscribe(both, '')), { method: 'Email request', target: 'mailto:u@list.com?subject=stop' });
+  assert.deepEqual(plain(planUnsubscribe('<https://list.com/u>', '')), { method: 'Link', target: 'https://list.com/u' });
+  assert.equal(planUnsubscribe('', ''), null);
+  assert.equal(planUnsubscribe('<javascript:alert(1)>', ''), null);
+});
+
+test('parseMailto reads the address and strips header-injection attempts', () => {
+  assert.deepEqual(plain(parseMailto('mailto:leave@list.org?subject=unsubscribe%20me&body=bye')),
+    { to: 'leave@list.org', subject: 'unsubscribe me', body: 'bye' });
+  assert.deepEqual(plain(parseMailto('mailto:leave@list.org')), { to: 'leave@list.org', subject: 'unsubscribe', body: 'unsubscribe' });
+  assert.equal(parseMailto('mailto:a@b.org,c@d.org'), null);
+  assert.equal(parseMailto('mailto:not-an-address'), null);
+  assert.equal(parseMailto('mailto:x@y.org?subject=hi%0D%0ABcc:%20evil@z.com').subject, 'hi Bcc: evil@z.com');
 });

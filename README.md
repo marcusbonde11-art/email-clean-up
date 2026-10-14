@@ -11,11 +11,15 @@ your own Google account. No server, API keys or extra subscriptions are needed.
 - **Asks you about everything else:** each unclear email becomes a row in the Google Sheet
   **Email Cleanup Review**. You mark it **Delete** or **Keep**, and the agent learns that as a
   rule for the sender.
+- **Unsubscribes first:** before it deletes a newsletter you have never opened, it tries to
+  unsubscribe you using the sender's own unsubscribe mechanism. Each attempt is recorded in the
+  **Unsubscribe Log** tab as *Succeeded*, *Failed* or *No unsubscribe option found*.
 - **Organizes:** it files unsorted inbox mail into **Receipts**, **School**, **Work** and
   **Bills**. When a sender keeps showing up, it may create up to two new folders per week, named
   after that sender.
-- **Trial first:** until you approve the trial, nothing is deleted, moved or labelled. Every email
-  it *would* delete is listed in the **Trial Deletions** tab for you to check.
+- **Trial first:** until you approve the trial, nothing is deleted, moved, labelled or unsubscribed.
+  Every email it *would* delete is listed in the **Trial Deletions** tab, and every unsubscribe it
+  *would* attempt is listed in the **Unsubscribe Log** tab. Nothing is clicked or sent.
 
 ## One-time setup (about 10 minutes)
 
@@ -31,7 +35,8 @@ your own Google account. No server, API keys or extra subscriptions are needed.
    `.clasp.json`, put in the Script ID from **Project Settings**, then run
    `npm i -g @google/clasp && clasp login && clasp push`.
 5. In the function dropdown at the top, pick **`setup`** and click **Run**. Approve the permission
-   prompt (Gmail, Sheets, triggers). If Google warns that the app is unverified, click
+   prompt. It asks for Gmail, Sheets and triggers, plus permission to connect to external services
+   and send email, which are used only for unsubscribe links and unsubscribe emails. If Google warns that the app is unverified, click
    **Advanced → Go to Email Cleanup Agent**. This is your own script.
 6. The execution log prints the link to a new Google Sheet called **Email Cleanup Review**. It is
    also in your Google Drive. Open its **Settings** tab and fill in:
@@ -46,12 +51,16 @@ your own Google account. No server, API keys or extra subscriptions are needed.
 
 1. Open the **Trial Deletions** tab. It lists every email the agent would have deleted, with the
    reason. Use the **Open** link to look at any of them.
-2. If something should not be deleted, set its **Decision** to **Keep**. That sender becomes a
+2. Open the **Unsubscribe Log** tab. It lists each never-opened newsletter sender the agent would
+   unsubscribe you from, and how (*Method* and *Unsubscribe Target*). If you want to keep one of
+   those newsletters, mark that sender's email **Keep** in Trial Deletions; it is then neither
+   unsubscribed nor deleted.
+3. If something should not be deleted, set its **Decision** to **Keep**. That sender becomes a
    "keep" rule from now on.
-3. Optionally, go through the **Email Cleanup Review** tab now as well.
-4. If the pattern looks wrong, tell me (or edit `src/Classifier.js`). To re-check, run `runNow`
+4. Optionally, go through the **Email Cleanup Review** tab now as well.
+5. If the pattern looks wrong, tell me (or edit `src/Classifier.js`). To re-check, run `runNow`
    again. Each trial only adds emails that are not already listed.
-5. When you are happy, tick **Trial approved** in the **Settings** tab. The next weekly run is a
+6. When you are happy, tick **Trial approved** in the **Settings** tab. The next weekly run is a
    real one. To start it right away, run `runNow`.
 
 The agent will not run for real while **Wife email addresses** is empty, even if the trial is
@@ -74,24 +83,37 @@ approved.
    | Clear marketing (mailing-list email with promotional language) | Deleted |
    | Notification that may carry a personal message ("X sent you a message", "commented on…") | Logged for review |
    | Automated email about account security, money, health, travel or legal matters | Logged for review |
-   | Mailing-list email you have never opened from a sender you have never opened | Deleted |
+   | Mailing-list email you have never opened from a sender you have never opened | Unsubscribed, then deleted |
    | Automated notification (no-reply style sender) in Updates/Social or from a mailing list | Deleted |
    | Ordinary email from a person | Kept |
    | Anything else | Logged for review |
 
 3. **Logs unclear emails** to the **Email Cleanup Review** tab: Sender, Subject, Date, Reason, a blank
    **Decision** column (Delete / Keep), and a link to the email. An email is only logged once.
-4. **Deletes** by moving emails to Gmail's **Trash**. You can still recover them there for 30
+4. **Unsubscribes** from never-opened newsletters before deleting them. This happens once per
+   sender per run, using the first available option from the email's `List-Unsubscribe` header:
+   - **One-click link**: the standard one-click unsubscribe request that Gmail's own Unsubscribe
+     button uses. It counts as *Succeeded* when the sender's server accepts it.
+   - **Email request**: sends the unsubscribe email the sender asks for, from your account. These
+     emails appear in your **Sent** folder.
+   - **Link**: opens the sender's unsubscribe link. Some senders then also want you to click a
+     confirmation button on their page, so the Details column says so.
+   - No header at all: logged as *No unsubscribe option found*, and the email is deleted anyway.
+
+   A sender whose unsubscribe succeeded is not tried again. If an attempt failed, the next weekly
+   run tries again when more emails from that sender arrive. The agent never clicks links inside an
+   email's body. It only uses the standard header that mailing lists publish for this purpose.
+5. **Deletes** by moving emails to Gmail's **Trash**. You can still recover them there for 30
    days. Each deletion is recorded in the **Deletion Log** tab.
-5. **Sorts** unsorted inbox email into **Receipts**, **School**, **Work** and **Bills**. It also
+6. **Sorts** unsorted inbox email into **Receipts**, **School**, **Work** and **Bills**. It also
    continues filing into folders it created earlier for recurring senders. Sorting adds the Gmail
    label and leaves the email in the inbox. That way "never move" stays true for protected mail,
    and the email still shows up in the folder.
-6. **Creates up to 2 new folders per week**, but only for a company or mailing-list sender with at
+7. **Creates up to 2 new folders per week**, but only for a company or mailing-list sender with at
    least 5 unsorted inbox emails. Personal contacts and your wife never get one. The folder name is
    in plain language (e.g. `Costco`). Each new folder is recorded in the **Folder Log** tab.
-7. **Writes a summary row** to **Run Log**: emails checked, deleted, newly logged for review, kept,
-   sorted, new folders, and any notes.
+8. **Writes a summary row** to **Run Log**: emails checked, deleted, newly logged for review, kept,
+   sorted, new folders, unsubscribe outcomes, and any notes.
 
 ## The Google Sheet
 
@@ -103,10 +125,24 @@ approved.
 | Learned Rules | Per-sender rules built from your decisions. To change one, change the Decision in the Review tab. |
 | Folder Log | Every folder the agent created, and why. |
 | Deletion Log | Every email moved to Trash, with the rule that triggered it. |
+| Unsubscribe Log | Every unsubscribe attempt (or, during the trial, every planned attempt): sender, method, target, and the outcome *Succeeded*, *Failed* or *No unsubscribe option found*, with details. |
 | Run Log | One row per run. |
 
 Don't delete rows from the Review tab after you mark them. Rules are rebuilt from those markings,
 although rules already saved in **Learned Rules** stay there.
+
+## Updating an existing installation
+
+If you set the agent up before the unsubscribe step existed:
+
+1. Paste the new versions of every file in `src/` into your Apps Script project, including
+   `appsscript.json`, which adds one new permission.
+2. Run **`setup`** once and approve the new permission prompt (connecting to external services).
+   This does not create a second Sheet or a second weekly trigger. It does start a run right away:
+   a trial, or a real run if you have already approved the trial.
+
+Your existing Sheet gets the **Unsubscribe Log** tab and a new **Unsubscribes** column in Run Log
+automatically on the next run.
 
 ## Script functions
 
@@ -124,7 +160,7 @@ npm test     # unit tests for the classifier, plus full trial → live runs agai
 ```
 
 - `src/Classifier.js`: all the delete / keep / review / folder rules (pure JS, unit tested)
-- `src/Main.js`: the weekly run (learn → sweep → trash → folders → finish), split into segments to
+- `src/Main.js`: the weekly run (learn → sweep → unsubscribe → trash → folders → finish), split into segments to
   fit Apps Script's 6-minute limit
 - `src/Sheet.js`, `src/Gmail.js`: Google Sheets and Gmail API wrappers
 - `src/Config.js`: schedule, folder limits and search passes

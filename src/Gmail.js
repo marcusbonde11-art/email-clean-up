@@ -2,7 +2,8 @@
  * Thin wrappers over the Gmail advanced service (Gmail API v1).
  */
 
-const META_HEADERS = ['From', 'Subject', 'List-Unsubscribe', 'List-Id', 'Precedence', 'Auto-Submitted', 'Feedback-ID'];
+const META_HEADERS = ['From', 'Subject', 'List-Unsubscribe', 'List-Unsubscribe-Post', 'List-Id', 'Precedence',
+  'Auto-Submitted', 'Feedback-ID'];
 
 let LABELS_BY_NAME_ = null;
 let MAIL_BASE_URL_ = null;
@@ -92,4 +93,34 @@ function threadLink_(id) {
     MAIL_BASE_URL_ = 'https://mail.google.com/mail/u/' + (user || '0') + '/';
   }
   return '=HYPERLINK("' + MAIL_BASE_URL_ + '#all/' + id + '","Open")';
+}
+
+/**
+ * Carries out one unsubscribe plan from planUnsubscribe().
+ * @return {{status: string, details: string}} status is 'Succeeded' or 'Failed'
+ */
+function attemptUnsubscribe_(method, target) {
+  try {
+    if (method === 'Email request') {
+      const mail = parseMailto(target);
+      if (!mail) return { status: 'Failed', details: 'Unsubscribe address could not be read' };
+      const raw = 'To: ' + mail.to + '\r\nSubject: ' + mail.subject +
+        '\r\nContent-Type: text/plain; charset=UTF-8\r\n\r\n' + mail.body;
+      Gmail.Users.Messages.send({ raw: Utilities.base64EncodeWebSafe(raw, Utilities.Charset.UTF_8) }, 'me');
+      return { status: 'Succeeded', details: 'Unsubscribe email sent to ' + mail.to };
+    }
+    const oneClick = method === 'One-click link';
+    const res = UrlFetchApp.fetch(target, oneClick
+      ? { method: 'post', payload: 'List-Unsubscribe=One-Click', contentType: 'application/x-www-form-urlencoded',
+        muteHttpExceptions: true, followRedirects: true }
+      : { method: 'get', muteHttpExceptions: true, followRedirects: true });
+    const code = res.getResponseCode();
+    if (code >= 200 && code < 300) {
+      return { status: 'Succeeded', details: oneClick ? 'One-click unsubscribe accepted (HTTP ' + code + ')'
+        : 'Unsubscribe link opened (HTTP ' + code + '); some senders also ask you to confirm on their page' };
+    }
+    return { status: 'Failed', details: 'Sender\'s server answered HTTP ' + code };
+  } catch (e) {
+    return { status: 'Failed', details: String(e.message).slice(0, 200) };
+  }
 }

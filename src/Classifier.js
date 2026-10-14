@@ -171,6 +171,7 @@ function normalizeThread(raw, flags) {
     hasAttachment: !!flags.hasAttachment,
     purchaseCategory: !!flags.purchaseCategory,
     listUnsubscribe: header_(ref, 'List-Unsubscribe'),
+    listUnsubscribePost: header_(ref, 'List-Unsubscribe-Post'),
     listId: header_(ref, 'List-Id'),
     precedence: header_(ref, 'Precedence'),
     autoSubmitted: header_(ref, 'Auto-Submitted'),
@@ -250,7 +251,9 @@ function classifyThread(t, ctx) {
   if (PERSONAL_HINT_RE.test(text)) return unsure('Automated email that may carry a personal message');
   if (topic) return unsure('Automated email about ' + topic + '; not safe to auto-delete');
   if (bulk && t.allUnread && t.fromEmail && !ctx.senderEverOpened(t.fromEmail)) {
-    return del('Newsletter / mailing list you have never opened');
+    const v = del('Newsletter / mailing list you have never opened');
+    v.unsubscribe = true; // unsubscribe first, then delete
+    return v;
   }
   if (automated && (bulk || t.category === 'updates' || t.category === 'social')) {
     return del('Automated notification with no personal content');
@@ -366,4 +369,40 @@ function folderNameFor(name, email) {
   }
   if (n === n.toLowerCase()) n = n.replace(/(^|\s)(\p{L})/gu, (m, sp, c) => sp + c.toUpperCase());
   return n.slice(0, 40).trim();
+}
+
+/**
+ * Picks how to unsubscribe from a mailing list using its List-Unsubscribe headers.
+ * Preference: one-click (RFC 8058) > email request > plain link.
+ * @return {{method: string, target: string}|null} null when there is no usable option
+ */
+function planUnsubscribe(listUnsubscribe, listUnsubscribePost) {
+  const entries = (String(listUnsubscribe || '').match(/<[^>]+>/g) || []).map(e => e.slice(1, -1).trim());
+  const https = entries.find(e => /^https?:\/\/[^\s]+$/i.test(e));
+  const mailto = entries.find(e => /^mailto:[^\s@]+@[^\s@?]+(?:\?.*)?$/i.test(e));
+  if (https && /List-Unsubscribe=One-Click/i.test(String(listUnsubscribePost || ''))) {
+    return { method: 'One-click link', target: https };
+  }
+  if (mailto) return { method: 'Email request', target: mailto };
+  if (https) return { method: 'Link', target: https };
+  return null;
+}
+
+/** Splits "mailto:a@b.com?subject=x&body=y" into parts with no line breaks (no header injection). */
+function parseMailto(target) {
+  const m = String(target).match(/^mailto:([^?]+)(?:\?(.*))?$/i);
+  if (!m) return null;
+  const clean = v => String(v || '').replace(/[\r\n]+/g, ' ').trim();
+  const params = {};
+  (m[2] || '').split('&').forEach(pair => {
+    const i = pair.indexOf('=');
+    if (i <= 0) return;
+    try {
+      params[pair.slice(0, i).toLowerCase()] = decodeURIComponent(pair.slice(i + 1).replace(/\+/g, ' '));
+    } catch (e) { /* ignore malformed parameter */ }
+  });
+  let to;
+  try { to = clean(decodeURIComponent(m[1])); } catch (e) { to = clean(m[1]); }
+  if (!/^[^\s@,;<>]+@[^\s@,;<>]+\.[^\s@,;<>]+$/.test(to)) return null;
+  return { to: to, subject: clean(params.subject) || 'unsubscribe', body: clean(params.body) || 'unsubscribe' };
 }

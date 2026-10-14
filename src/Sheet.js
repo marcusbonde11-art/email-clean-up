@@ -9,14 +9,17 @@ const COLUMNS = {
   RULES: ['Sender Email', 'Rule', 'Learned From', 'Learned On'],
   FOLDERS: ['Created On', 'Folder Name', 'Why', 'Emails Filed'],
   DELETED: ['Sender', 'Subject', 'Date', 'Rule', 'Link', 'Status', 'Sender Email', 'Thread ID', 'Run ID'],
+  UNSUB: ['Sender', 'Subject', 'Date', 'Method', 'Unsubscribe Target', 'Status', 'Details', 'Sender Email',
+    'Thread ID', 'Run ID', 'Logged On'],
   RUNS: ['Started', 'Finished', 'Mode', 'Threads Checked', 'Deleted', 'New Review Rows', 'Kept',
-    'Sorted into Folders', 'New Folders', 'Notes'],
+    'Sorted into Folders', 'New Folders', 'Notes', 'Unsubscribes'],
 };
 
 const HIDDEN_COLUMNS = {
   REVIEW: ['Sender Email', 'Thread ID'],
   TRIAL: ['Sender Email', 'Thread ID'],
   DELETED: ['Thread ID', 'Run ID'],
+  UNSUB: ['Thread ID', 'Run ID'],
 };
 
 const SETTING = {
@@ -45,7 +48,7 @@ const SETTINGS_ROWS = [
   [SETTING.LAST_RUN, '', 'Filled in by the agent.'],
 ];
 
-const TAB_ORDER = ['REVIEW', 'TRIAL', 'SETTINGS', 'RULES', 'FOLDERS', 'DELETED', 'RUNS'];
+const TAB_ORDER = ['REVIEW', 'TRIAL', 'SETTINGS', 'RULES', 'FOLDERS', 'DELETED', 'UNSUB', 'RUNS'];
 
 function spreadsheet_() {
   const id = PropertiesService.getScriptProperties().getProperty('SPREADSHEET_ID');
@@ -70,8 +73,11 @@ function ensureSpreadsheet_() {
 function ensureTab_(ss, key, index) {
   const name = CONFIG.TAB[key];
   let sh = ss.getSheetByName(name);
-  if (!sh) sh = ss.insertSheet(name, index);
-  if (sh.getLastRow() > 0) return sh;
+  if (!sh) sh = ss.insertSheet(name, Math.min(index, ss.getSheets().length));
+  if (sh.getLastRow() > 0) {
+    upgradeHeaders_(sh, COLUMNS[key]);
+    return sh;
+  }
 
   if (key === 'SETTINGS') {
     sh.getRange(1, 1, 1, 3).setValues([['Setting', 'Value', 'What it does']]).setFontWeight('bold');
@@ -94,10 +100,20 @@ function ensureTab_(ss, key, index) {
   ['Thread ID', 'Run ID', 'Sender Email'].filter(h => cols.indexOf(h) !== -1)
     .forEach(h => sh.getRange(1, cols.indexOf(h) + 1, sh.getMaxRows(), 1).setNumberFormat('@'));
   const widths = { Sender: 240, Subject: 360, Reason: 340, 'Why it would be deleted': 300, Rule: 260,
-    Notes: 420, Why: 360, 'Sender Email': 240, 'Learned From': 360, 'Folder Name': 200 };
+    Notes: 420, Why: 360, Details: 360, 'Unsubscribe Target': 300, 'Sender Email': 240, 'Learned From': 360, 'Folder Name': 200 };
   cols.forEach((h, i) => { if (widths[h]) sh.setColumnWidth(i + 1, widths[h]); });
   if (cols.indexOf('Decision') !== -1) applyDecisionValidation_(sh, cols.indexOf('Decision') + 1);
   return sh;
+}
+
+/** Adds columns introduced by a newer version of the agent to a sheet made by an older one. */
+function upgradeHeaders_(sh, cols) {
+  if (!cols) return;
+  const current = sh.getRange(1, 1, 1, cols.length).getValues()[0].map(String);
+  const filled = current.filter(Boolean).length;
+  if (filled < cols.length && current.slice(0, filled).every((h, i) => h === cols[i])) {
+    sh.getRange(1, 1, 1, cols.length).setValues([cols]).setFontWeight('bold').setBackground('#f1f3f4');
+  }
 }
 
 function applyDecisionValidation_(sh, col) {

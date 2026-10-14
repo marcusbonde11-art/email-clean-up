@@ -32,6 +32,16 @@ function inbox() {
       labels: ['CATEGORY_PROMOTIONS'], headers: BULK }),
     thread('news', { from: 'Garden Weekly <hello@gardenweekly.com>', subject: 'Issue 12',
       labels: ['UNREAD', 'CATEGORY_UPDATES'], headers: BULK }),
+    thread('news2', { from: 'Bakery Letters <hello@bakeryletters.com>', subject: 'This week at the bakery',
+      labels: ['UNREAD', 'CATEGORY_UPDATES'], headers: { 'List-Unsubscribe': '<https://bakeryletters.com/u?id=7>',
+        'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click' } }),
+    thread('news3', { from: 'Club Digest <digest@clubdigest.org>', subject: 'Club digest, week 40',
+      labels: ['UNREAD', 'CATEGORY_UPDATES'], headers: { 'List-Id': '<members.clubdigest.org>' } }),
+    thread('news4', { from: 'Hiking Notes <hello@hikingnotes.net>', subject: 'Trail notes #3',
+      labels: ['UNREAD', 'CATEGORY_UPDATES'], headers: { 'List-Unsubscribe': '<https://hikingnotes.net/fail/u>' } }),
+    thread('news5', { from: 'Poetry Daily <poems@poetrydaily.org>', subject: 'Today\'s poem',
+      labels: ['UNREAD', 'CATEGORY_UPDATES'],
+      headers: { 'List-Unsubscribe': '<mailto:leave@poetrydaily.org?subject=unsubscribe%20me>' } }),
     thread('receipt', { from: 'Amazon <auto-confirm@amazon.com>', subject: 'Your order #112-3345678',
       labels: ['CATEGORY_UPDATES'], headers: BULK }),
     thread('attach', { from: 'Shop <deals@email.shop.com>', subject: '50% off sale', headers: BULK,
@@ -83,7 +93,18 @@ function scenario(world) {
   assert.deepEqual(world.state.trashed, [], 'trial deletes nothing');
   assert.deepEqual(world.state.labelled, [], 'trial moves or labels nothing');
   const trial = world.sheet('Trial Deletions').rowsAsObjects();
-  assert.deepEqual(trial.map(r => r['Thread ID']).sort(), ['news', 'promo']);
+  assert.deepEqual(trial.map(r => r['Thread ID']).sort(), ['news', 'news2', 'news3', 'news4', 'news5', 'promo']);
+  // The trial lists what it would unsubscribe from, without clicking or sending anything.
+  assert.deepEqual(world.state.fetched, []);
+  assert.deepEqual(world.state.sent, []);
+  const unsubTrial = world.sheet('Unsubscribe Log').rowsAsObjects();
+  assert.deepEqual(unsubTrial.map(r => [r['Thread ID'], r.Method, r.Status]).sort(), [
+    ['news', 'Email request', 'Would attempt (trial)'],
+    ['news2', 'One-click link', 'Would attempt (trial)'],
+    ['news3', '', 'No unsubscribe option found (trial)'],
+    ['news4', 'Link', 'Would attempt (trial)'],
+    ['news5', 'Email request', 'Would attempt (trial)'],
+  ]);
   const review = world.sheet('Email Cleanup Review').rowsAsObjects();
   assert.deepEqual(review.map(r => r['Thread ID']).sort(),
     ['costco0', 'costco1', 'costco2', 'costco3', 'costco4', 'costco5', 'security']);
@@ -93,6 +114,8 @@ function scenario(world) {
   assert.equal(runs.length, 1);
   assert.equal(runs[0].Mode, 'Trial');
   assert.match(runs[0]['New Folders'], /^Costco \(would create/);
+  assert.match(runs[0].Unsubscribes, /Would attempt: 4/);
+  assert.match(runs[0].Unsubscribes, /No unsubscribe option found: 1/);
 
   // 2. Approval with the wife's address removed keeps it a trial.
   setSetting(world, 'Trial approved', true);
@@ -103,7 +126,8 @@ function scenario(world) {
   runs = world.sheet('Run Log').rowsAsObjects();
   assert.equal(runs[1].Mode, 'Trial');
   assert.match(runs[1].Notes, /no wife email address/);
-  assert.equal(world.sheet('Trial Deletions').rowsAsObjects().length, 2, 'no duplicate trial rows');
+  assert.equal(world.sheet('Trial Deletions').rowsAsObjects().length, 6, 'no duplicate trial rows');
+  assert.equal(world.sheet('Unsubscribe Log').rowsAsObjects().length, 5, 'no duplicate unsubscribe rows');
 
   // 3. Mark decisions, restore the wife's address, and run for real.
   setSetting(world, 'Wife email addresses', 'jo@family.net');
@@ -112,7 +136,25 @@ function scenario(world) {
   world.api.runNow();
   drain(world);
 
-  assert.deepEqual(world.state.trashed, ['promo'], 'only the marketing email is deleted');
+  assert.deepEqual(world.state.trashed.slice().sort(), ['news2', 'news3', 'news4', 'news5', 'promo'],
+    'marketing and never-opened newsletters are deleted; the newsletter you marked Keep is not');
+
+  // Unsubscribe attempts happen before anything is deleted, and each outcome is logged.
+  const firstTrash = world.state.events.findIndex(e => e.startsWith('trash:'));
+  const attempts = world.state.events.filter(e => !e.startsWith('trash:'));
+  assert.equal(attempts.length, 3);
+  assert.ok(world.state.events.slice(0, firstTrash).length === 3, 'all attempts before the first deletion');
+  assert.deepEqual(world.state.fetched.slice().sort(), [
+    ['get', 'https://hikingnotes.net/fail/u', ''],
+    ['post', 'https://bakeryletters.com/u?id=7', 'List-Unsubscribe=One-Click'],
+  ]);
+  assert.equal(world.state.sent.length, 1);
+  assert.match(world.state.sent[0], /^To: leave@poetrydaily\.org\r\nSubject: unsubscribe me\r\n/);
+  const unsubLive = world.sheet('Unsubscribe Log').rowsAsObjects().slice(5);
+  assert.deepEqual(unsubLive.map(r => [r['Thread ID'], r.Status]).sort(), [
+    ['news2', 'Succeeded'], ['news3', 'No unsubscribe option found'], ['news4', 'Failed'], ['news5', 'Succeeded'],
+  ]);
+  assert.ok(unsubLive.every(r => r.Details), 'every outcome has details');
   const rules = world.sheet('Learned Rules').rowsAsObjects();
   assert.deepEqual(rules.map(r => [r['Sender Email'], r.Rule]).sort(),
     [['hello@gardenweekly.com', 'Keep'], ['no-reply@accounts.google.com', 'Keep']]);
@@ -124,10 +166,14 @@ function scenario(world) {
   const folders = world.sheet('Folder Log').rowsAsObjects().map(r => r['Folder Name']);
   assert.deepEqual(folders, ['Receipts', 'School', 'Work', 'Bills', 'Costco']);
   const deleted = world.sheet('Deletion Log').rowsAsObjects();
-  assert.deepEqual(deleted.map(r => [r['Thread ID'], r.Status]), [['promo', 'Moved to Trash']]);
+  assert.deepEqual(deleted.map(r => r['Thread ID']).sort(), ['news2', 'news3', 'news4', 'news5', 'promo']);
+  assert.ok(deleted.every(r => r.Status === 'Moved to Trash'));
   runs = world.sheet('Run Log').rowsAsObjects();
   assert.equal(runs[2].Mode, 'Live');
-  assert.equal(runs[2].Deleted, 1);
+  assert.equal(runs[2].Deleted, 5);
+  assert.match(runs[2].Unsubscribes, /Succeeded: 2/);
+  assert.match(runs[2].Unsubscribes, /Failed: 1/);
+  assert.match(runs[2].Unsubscribes, /No unsubscribe option found: 1/);
   assert.equal(runs[2]['New Folders'], 'Costco');
   // 7 from the first trial, plus the wife's forward, which went to review (not deletion) while her
   // address was blank in step 2. Nothing is logged twice.
@@ -142,6 +188,7 @@ function scenario(world) {
   runs = world.sheet('Run Log').rowsAsObjects();
   assert.equal(runs[3].Deleted, 0);
   assert.equal(runs[3]['New Folders'], 'none');
+  assert.equal(runs[3].Unsubscribes, 'none');
   assert.equal(world.state.labelled.length, 7);
 }
 
@@ -166,4 +213,18 @@ test('sender-controlled text cannot become a spreadsheet formula', () => {
   assert.ok(written.includes("'=IMPORTXML(\"x\") Security alert"), 'subject written as text');
   const formulas = written.filter(v => typeof v === 'string' && v.startsWith('='));
   assert.ok(formulas.length > 0 && formulas.every(v => v.startsWith('=HYPERLINK("https://mail.google.com/')));
+});
+
+test('a sheet made by the first version gains the Unsubscribe Log tab and column', () => {
+  const world = makeWorld(inbox());
+  world.api.setup();
+  // Make it look like the first version: no Unsubscribe Log tab, no Unsubscribes column.
+  const ss = world.state.ss;
+  ss.sheets = ss.sheets.filter(s => s.getName() !== 'Unsubscribe Log');
+  world.sheet('Run Log').getRange(1, 11).setValue('');
+  setSetting(world, 'Wife email addresses', 'jo@family.net');
+  world.api.runNow();
+  drain(world);
+  assert.ok(world.sheet('Unsubscribe Log').rowsAsObjects().length > 0);
+  assert.match(world.sheet('Run Log').rowsAsObjects()[0].Unsubscribes, /Would attempt/);
 });

@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm test
+
+  # Optional: pushes src/ to your Apps Script project whenever main changes.
+  # Enable it by adding two repository secrets (see README, "Automatic deploys").
+  deploy:
+    needs: test
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    env:
+      CLASPRC_JSON: ${{ secrets.CLASPRC_JSON }}
+      SCRIPT_ID: ${{ secrets.SCRIPT_ID }}
+    steps:
+      - uses: actions/checkout@v4
+        if: env.CLASPRC_JSON != '' && env.SCRIPT_ID != ''
+      - uses: actions/setup-node@v4
+        if: env.CLASPRC_JSON != '' && env.SCRIPT_ID != ''
+        with:
+          node-version: 22
+      - name: Push to Apps Script
+        if: env.CLASPRC_JSON != '' && env.SCRIPT_ID != ''
+        run: |
+          echo "$CLASPRC_JSON" > ~/.clasprc.json
+          printf '{"scriptId":"%s","rootDir":"src"}' "$SCRIPT_ID" > .clasp.json
+          npx --yes @google/clasp@2.4.2 push --force
+      - name: Skip (secrets not configured)
+        if: env.CLASPRC_JSON == '' || env.SCRIPT_ID == ''
+        run: echo "CLASPRC_JSON / SCRIPT_ID secrets not set; skipping deploy."

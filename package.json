@@ -1,0 +1,8 @@
+{
+  "name": "email-clean-up",
+  "private": true,
+  "description": "Weekly Gmail cleanup and organization agent (Google Apps Script).",
+  "scripts": {
+    "test": "node --test test/*.test.js"
+  }
+}
